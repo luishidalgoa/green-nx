@@ -1,0 +1,29 @@
+# Fork-only CI: builds the .nro inside the devkitpro image so changes can be
+# verified without a local toolchain. Not intended for upstream PRs.
+name: build
+
+on: [push, workflow_dispatch]
+
+jobs:
+  nro:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache WebRTC deps
+        uses: actions/cache@v4
+        with:
+          path: deps/switch
+          key: deps-${{ hashFiles('deps/build-switch.sh', 'deps/patches/**') }}
+
+      - name: Build WebRTC deps (libpeer, libsrtp, usrsctp)
+        run: test -f deps/switch/lib/libpeer.a || bash deps/build-switch.sh
+
+      - name: Build green-nx.nro
+        run: make -j"$(nproc)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: green-nx.nro
+          path: green-nx.nro
