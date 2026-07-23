@@ -149,6 +149,7 @@ struct Settings {
     int language = 0;   // index into kLanguage* (0 = English US)
     int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
     float volume = 3.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
+    int debug_hud = 1;  // 0=off, 1=on: on-screen debug overlay while streaming
 };
 
 constexpr int kLanguageCount = 14;
@@ -281,6 +282,7 @@ Settings load_settings() {
         std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
     settings.source = std::clamp(data.value("source", 0), 0, 2);
     settings.volume = std::clamp(data.value("volume", 3.0f), 0.5f, 4.0f);
+    settings.debug_hud = std::clamp(data.value("debug_hud", 1), 0, 1);
     return settings;
 }
 
@@ -292,7 +294,8 @@ void save_settings(const Settings& settings) {
                 {"region", settings.region},
                 {"language", settings.language},
                 {"source", settings.source},
-                {"volume", settings.volume}}.dump(2);
+                {"volume", settings.volume},
+                {"debug_hud", settings.debug_hud}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -857,6 +860,7 @@ void launch_stream(App& app, bool home) {
     const char* locale = kLanguageCodes[app.settings.language];
     app.engine->set_audio_gain(app.settings.volume);
     app.engine->set_low_latency(app.settings.quality == 2);
+    app.engine->set_debug_hud(app.settings.debug_hud != 0);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1243,6 +1247,7 @@ void draw_settings(App& app) {
                         app.settings.source == 2   ? console_label(app)
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
+    rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
     // Compress the row pitch when there are many rows so the last one always
     // stays above the note box (~y=820) instead of sliding under it. Caps at the
     // original 108 so a short list looks unchanged.
@@ -1281,37 +1286,37 @@ void draw_settings(App& app) {
     // Contextual note: a fixed structured box (fill kBar + frame + accent
     // side bar), swapping content with the focused row. The bar turns kWarn
     // while Region bypass is active.
+    // "Preferred source" only exists when a console is linked; "Debug HUD" is
+    // always the last row -- so their indices shift by one. Compute them.
+    int src_row = app.consoles.empty() ? -1 : 6;
+    int hud_row = app.consoles.empty() ? 6 : 7;
     const char* line1;
     const char* line2;
-    switch (app.settings_cursor) {
-        case 5:
-            line1 = "Output volume for streamed audio — raise it if the stream";
-            line2 = "sounds quiet even with the console at full volume.";
-            break;
-        case 6:
-            line1 = "Where Play launches games: xCloud (cloud servers) or";
-            line2 = "remote play from your own console over your network.";
-            break;
-        case 1:
-            line1 = "Positional keeps the Switch layout under your thumbs;";
-            line2 = "match labels follows the printed A/B/X/Y letters.";
-            break;
-        case 2:
-            line1 = "Rumble intensity for the game's vibration effects.";
-            line2 = "High still leaves headroom to avoid the HD-rumble hum.";
-            break;
-        case 3:
-            line1 = "Region bypass spoofs your location to Xbox to reach";
-            line2 = "xCloud from an unsupported country. Use at your own risk.";
-            break;
-        case 4:
-            line1 = "Sets the streamed console's language for games without";
-            line2 = "an in-game language menu. Takes effect on next launch.";
-            break;
-        default:
-            line1 = "720p or 1080p. \"1080p low-latency\" shows frames the";
-            line2 = "instant they decode: less lag, a touch less smooth.";
-            break;
+    int c = app.settings_cursor;
+    if (c == 1) {
+        line1 = "Positional keeps the Switch layout under your thumbs;";
+        line2 = "match labels follows the printed A/B/X/Y letters.";
+    } else if (c == 2) {
+        line1 = "Rumble intensity for the game's vibration effects.";
+        line2 = "High still leaves headroom to avoid the HD-rumble hum.";
+    } else if (c == 3) {
+        line1 = "Region bypass spoofs your location to Xbox to reach";
+        line2 = "xCloud from an unsupported country. Use at your own risk.";
+    } else if (c == 4) {
+        line1 = "Sets the streamed console's language for games without";
+        line2 = "an in-game language menu. Takes effect on next launch.";
+    } else if (c == 5) {
+        line1 = "Output volume for streamed audio — raise it if the stream";
+        line2 = "sounds quiet even with the console at full volume.";
+    } else if (c == src_row) {
+        line1 = "Where Play launches games: xCloud (cloud servers) or";
+        line2 = "remote play from your own console over your network.";
+    } else if (c == hud_row) {
+        line1 = "On-screen overlay with live stream stats while you play.";
+        line2 = "A debug tool — turn it off for a clean picture.";
+    } else {
+        line1 = "720p or 1080p. \"1080p low-latency\" shows frames the";
+        line2 = "instant they decode: less lag, a touch less smooth.";
     }
     SDL_Rect note = {120, 820, gfx::kWidth - 240, 120};
     app.gfx.fill(note, gfx::kBar);
@@ -2097,7 +2102,7 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                int last_row = app.consoles.empty() ? 5 : 6;
+                int last_row = app.consoles.empty() ? 6 : 7;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2127,9 +2132,18 @@ int main(int argc, char** argv) {
                     else if (app.settings_cursor == 5)
                         app.settings.volume = std::clamp(
                             app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
-                    else
-                        app.settings.source =
-                            (app.settings.source + direction + 3) % 3;
+                    else {
+                        // Rows 6+ : optional "Preferred source", then "Debug HUD"
+                        // (always last). Their indices depend on the console list.
+                        int src_row = app.consoles.empty() ? -1 : 6;
+                        int hud_row = app.consoles.empty() ? 6 : 7;
+                        if (app.settings_cursor == src_row)
+                            app.settings.source =
+                                (app.settings.source + direction + 3) % 3;
+                        else if (app.settings_cursor == hud_row)
+                            app.settings.debug_hud =
+                                app.settings.debug_hud ? 0 : 1;
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) app.scene = app.settings_return;

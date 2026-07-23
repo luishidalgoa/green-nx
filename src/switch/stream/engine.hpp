@@ -62,6 +62,9 @@ public:
     // start(); default false.
     void set_low_latency(bool enabled) { low_latency_ = enabled; }
 
+    // Draw the on-screen debug HUD overlay while streaming. Set before start().
+    void set_debug_hud(bool enabled) { debug_hud_ = enabled; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -184,6 +187,7 @@ private:
     double next_present_ms_ = 0;
     double last_present_ms_ = 0;            // low-latency mode: last present time
     bool low_latency_ = false;              // present-on-decode vs steady clock
+    bool debug_hud_ = true;                 // draw the debug HUD overlay
     std::atomic<bool> frame_ready_{false};  // decode thread -> render: new frame
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
