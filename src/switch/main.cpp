@@ -1188,8 +1188,13 @@ void draw_settings(App& app) {
                         app.settings.source == 2   ? console_label(app)
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
+    // Compress the row pitch when there are many rows so the last one always
+    // stays above the note box (~y=820) instead of sliding under it. Caps at the
+    // original 108 so a short list looks unchanged.
+    int pitch = std::min(108, (800 - 170) /
+                                  std::max(1, static_cast<int>(rows.size())));
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-        SDL_Rect row = {120, 170 + i * 108, gfx::kWidth - 240, 96};
+        SDL_Rect row = {120, 170 + i * pitch, gfx::kWidth - 240, pitch - 12};
         bool focused = i == app.settings_cursor;
         // Row-focus variant (card 1g): wide elements don't scale — surface
         // lift + 10px side bar + 4px border + one glow frame instead.
