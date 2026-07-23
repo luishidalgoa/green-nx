@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -156,8 +157,53 @@ constexpr int kVibrationLevels = 4;
 Settings load_settings();
 void save_settings(const Settings& settings);
 
+// Short synthesized "tick" for menu navigation. Played through SDL's audren
+// backend, which is independent of the stream's audout output, so the two never
+// conflict. Amplitude follows the user's "volume" setting.
+class UiSound {
+public:
+    bool init() {
+        SDL_AudioSpec want{}, have{};
+        want.freq = 48000;
+        want.format = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples = 512;
+        dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        if (!dev_) return false;
+        const int n = 48000 * 16 / 1000;  // ~16 ms
+        click_.resize(static_cast<size_t>(n) * 2);
+        for (int i = 0; i < n; ++i) {
+            float t = static_cast<float>(i) / 48000.0f;
+            float s = std::sin(2.0f * 3.14159265f * 1600.0f * t) *
+                      std::exp(-t * 140.0f) * 0.09f;  // quiet base level
+            auto v = static_cast<int16_t>(s * 32767.0f);
+            click_[i * 2] = v;
+            click_[i * 2 + 1] = v;
+        }
+        SDL_PauseAudioDevice(dev_, 0);
+        return true;
+    }
+    void play(float volume) {
+        if (!dev_ || click_.empty()) return;
+        std::vector<int16_t> buf(click_.size());
+        for (size_t i = 0; i < click_.size(); ++i) {
+            int v = static_cast<int>(click_[i] * volume);
+            buf[i] = v > 32767 ? 32767 : (v < -32768 ? -32768
+                                                     : static_cast<int16_t>(v));
+        }
+        SDL_ClearQueuedAudio(dev_);  // don't pile up on rapid navigation
+        SDL_QueueAudio(dev_, buf.data(),
+                       static_cast<Uint32>(buf.size() * sizeof(int16_t)));
+    }
+
+private:
+    SDL_AudioDeviceID dev_ = 0;
+    std::vector<int16_t> click_;
+};
+
 struct App {
     gfx::Gfx gfx;
+    UiSound ui_sound;
     std::unique_ptr<Covers> covers;
     std::unique_ptr<XboxAuth> auth;
 
@@ -1176,6 +1222,8 @@ void draw_settings(App& app) {
         {"Vibration", kVibrationLabels[app.settings.vibration]},
         {"Region bypass", kRegionLabels[app.settings.region]},
         {"Game language", kLanguageLabels[app.settings.language]},
+        {"Volume",
+         std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
@@ -1219,6 +1267,10 @@ void draw_settings(App& app) {
     const char* line2;
     switch (app.settings_cursor) {
         case 5:
+            line1 = "Output volume for streamed audio — raise it if the stream";
+            line2 = "sounds quiet even with the console at full volume.";
+            break;
+        case 6:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
             break;
@@ -1333,6 +1385,73 @@ void apply_rumble(App& app) {
 // Shared error card (cards 1i/1j): top 8px error band + a boxed card with
 // an "!" glyph header, message body, and optional context/log lines.
 // Returns the y where extra content (suggestion box) may continue.
+// Turn a raw engine/HTTP error into a short, actionable line. Unmatched errors
+// fall through unchanged; the full text is always in stream-log.txt.
+std::string friendly_error(const std::string& raw) {
+    std::string s = lowercase(raw);
+    auto has = [&](const char* n) { return s.find(n) != std::string::npos; };
+    if (has("resolve host") || has("couldn't resolve") || has("could not resolve"))
+        return "Couldn't reach Microsoft sign-in (DNS). Check your connection; "
+               "on a shared PC or phone hotspot, set a manual DNS such as "
+               "1.1.1.1 on the console.";
+    if (has("timed out") || has("timeout"))
+        return "The connection timed out. Check your network and try again.";
+    if (has("connection refused") || has("connect to host") ||
+        has("couldn't connect") || has("could not connect"))
+        return "Couldn't connect to the server. Check your internet and retry.";
+    if (has("agentcommanderror"))
+        return "Your console didn't accept the session. Make sure it's on (or "
+               "in Instant-on) and try again.";
+    if (has("401") || has("403") || has("unauthorized") || has("token"))
+        return "Sign-in expired or was rejected. Try signing in again.";
+    return raw;
+}
+
+// Word-wrap `text` to lines no wider than max_width at `size`, drawing them from
+// (x, y) downward; caps at max_lines and ellipsizes the overflow. Returns the y
+// just past the last line. Fixes long errors spilling outside their card.
+int draw_text_wrapped(App& app, const std::string& text, int x, int y,
+                      gfx::FontSize size, gfx::Color color, int max_width,
+                      int line_h, int max_lines) {
+    auto width = [&](const std::string& s) { return app.gfx.text_width(s, size); };
+    std::vector<std::string> words;
+    for (size_t i = 0; i < text.size();) {
+        while (i < text.size() && text[i] == ' ') ++i;
+        size_t start = i;
+        while (i < text.size() && text[i] != ' ') ++i;
+        if (i > start) words.push_back(text.substr(start, i - start));
+    }
+    std::string line;
+    int lines = 0;
+    for (size_t w = 0; w < words.size(); ++w) {
+        std::string cand = line.empty() ? words[w] : line + " " + words[w];
+        if (width(cand) <= max_width) {
+            line = cand;
+            continue;
+        }
+        if (line.empty()) {  // a single word wider than the box: hard-truncate
+            line = words[w];
+            while (line.size() > 1 && width(line) > max_width) line.pop_back();
+            continue;
+        }
+        if (lines >= max_lines - 1) {  // no more room: ellipsize and stop
+            while (!line.empty() && width(line + "...") > max_width) line.pop_back();
+            app.gfx.text(line + "...", x, y, size, color);
+            return y + line_h;
+        }
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+        ++lines;
+        line = words[w];
+        while (line.size() > 1 && width(line) > max_width) line.pop_back();
+    }
+    if (!line.empty()) {
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+    }
+    return y;
+}
+
 int draw_error_card(App& app, const SDL_Rect& card, const char* title,
                     const std::string& message, const std::string& context,
                     bool show_log_path) {
@@ -1350,14 +1469,9 @@ int draw_error_card(App& app, const SDL_Rect& card, const char* title,
     app.gfx.fill({card.x, card.y + 128, card.w, 2}, gfx::kChip);
 
     int y = card.y + 164;
-    app.gfx.text(message.substr(0, 60), card.x + 48, y, gfx::FontSize::Body,
-                 gfx::kText);
-    if (message.size() > 60) {
-        y += 52;
-        app.gfx.text(message.substr(60, 60), card.x + 48, y,
-                     gfx::FontSize::Body, gfx::kText);
-    }
-    y += 60;
+    y = draw_text_wrapped(app, friendly_error(message), card.x + 48, y,
+                          gfx::FontSize::Body, gfx::kText, card.w - 96, 46, 4);
+    y += 12;
     if (!context.empty()) {
         app.gfx.text(context, card.x + 48, y, gfx::FontSize::Note,
                      gfx::kTextDim);
@@ -1623,6 +1737,7 @@ int main(int argc, char** argv) {
 
     App app;
     if (!app.gfx.init()) return 1;
+    app.ui_sound.init();  // menu navigation ticks (best-effort; ignored on fail)
     SDL_Joystick* joystick = SDL_JoystickOpen(0);
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
     app.auth = std::make_unique<XboxAuth>(data_path("tokens.json"));
@@ -1653,6 +1768,13 @@ int main(int argc, char** argv) {
     while (running) {
         Input input = poll_input(joystick);
         if (input.quit) break;
+
+        // Snapshot navigation state; a menu tick plays below if it moved this
+        // frame (grid cursor, tab, console cursor, settings row or volume).
+        int nav_cursor = app.cursor, nav_console = app.console_cursor,
+            nav_settings = app.settings_cursor;
+        LibraryTab nav_tab = app.tab;
+        float nav_volume = app.settings.volume;
 
         switch (app.scene) {
             case Scene::Splash:
@@ -1852,7 +1974,7 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                int last_row = app.consoles.empty() ? 4 : 5;
+                int last_row = app.consoles.empty() ? 5 : 6;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -1879,6 +2001,9 @@ int main(int argc, char** argv) {
                         app.settings.language =
                             (app.settings.language + direction + kLanguageCount) %
                             kLanguageCount;
+                    else if (app.settings_cursor == 5)
+                        app.settings.volume = std::clamp(
+                            app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
                     else
                         app.settings.source =
                             (app.settings.source + direction + 3) % 3;
@@ -1988,6 +2113,12 @@ int main(int argc, char** argv) {
             continue;      // deko3d owns the frame; no SDL pass this iteration
         }
 #endif
+
+        if (app.cursor != nav_cursor || app.tab != nav_tab ||
+            app.console_cursor != nav_console ||
+            app.settings_cursor != nav_settings ||
+            app.settings.volume != nav_volume)
+            app.ui_sound.play(app.settings.volume);
 
         app.covers->pump();
         app.gfx.begin_frame();
