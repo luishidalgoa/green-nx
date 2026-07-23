@@ -1176,6 +1176,8 @@ void draw_settings(App& app) {
         {"Vibration", kVibrationLabels[app.settings.vibration]},
         {"Region bypass", kRegionLabels[app.settings.region]},
         {"Game language", kLanguageLabels[app.settings.language]},
+        {"Volume",
+         std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
@@ -1219,6 +1221,10 @@ void draw_settings(App& app) {
     const char* line2;
     switch (app.settings_cursor) {
         case 5:
+            line1 = "Output volume for streamed audio — raise it if the stream";
+            line2 = "sounds quiet even with the console at full volume.";
+            break;
+        case 6:
             line1 = "Where Play launches games: xCloud (cloud servers) or";
             line2 = "remote play from your own console over your network.";
             break;
@@ -1852,7 +1858,7 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                int last_row = app.consoles.empty() ? 4 : 5;
+                int last_row = app.consoles.empty() ? 5 : 6;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -1879,6 +1885,9 @@ int main(int argc, char** argv) {
                         app.settings.language =
                             (app.settings.language + direction + kLanguageCount) %
                             kLanguageCount;
+                    else if (app.settings_cursor == 5)
+                        app.settings.volume = std::clamp(
+                            app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
                     else
                         app.settings.source =
                             (app.settings.source + direction + 3) % 3;
