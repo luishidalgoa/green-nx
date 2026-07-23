@@ -34,6 +34,12 @@
 using nlohmann::json;
 using namespace gnx;
 
+// Build version baked in by the Makefile (-DGNX_VERSION); CI stamps it as
+// "1.0.14-<short-sha>". Fallback keeps non-Switch/PC builds compiling.
+#ifndef GNX_VERSION
+#define GNX_VERSION "dev"
+#endif
+
 namespace {
 
 #ifdef __SWITCH__
@@ -1999,6 +2005,15 @@ int main(int argc, char** argv) {
 #endif
                 break;
             case Scene::Fatal: draw_fatal(app); break;
+        }
+        // Build version, unobtrusive in the bottom-left corner (hints are
+        // right-aligned, so this side of the footer is free). Skips the
+        // deko3d-owned stream view. Lets you read which build is running
+        // straight off the screen instead of opening the log.
+        if (app.scene != Scene::Stream) {
+            int cy = kFooterY + (kFooterH - 40) / 2;
+            app.gfx.text("v" GNX_VERSION, kMargin, cy + 4,
+                         gfx::FontSize::Small, gfx::kFaint);
         }
         app.gfx.end_frame();
     }
