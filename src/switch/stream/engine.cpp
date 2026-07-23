@@ -507,7 +507,7 @@ void Engine::worker() {
         // as the wake-up call but fails with AgentCommandError while the
         // console boots its streaming service (same behaviour Greenlight
         // sees). Retry a few times before surfacing the failure.
-        int attempts = home ? 4 : 1;
+        int attempts = home ? 6 : 1;
         for (int attempt = 0; attempt < attempts && !quit_; ++attempt) {
             if (attempt > 0) {
                 set_status("Waking your console... (attempt " +
@@ -550,19 +550,25 @@ void Engine::worker() {
             }
             session.stop();
             if (quit_) return;
-            bool agent_error =
-                session_error.find("AgentCommandError") != std::string::npos;
+            // Both errors mean the console isn't ready *yet*: AgentCommandError
+            // while it boots the streaming service, or a WNS
+            // "WaitingForServerToRegister" while it registers that service with
+            // Xbox. Both clear once the console finishes waking, so keep trying.
+            bool waking =
+                session_error.find("AgentCommandError") != std::string::npos ||
+                session_error.find("WaitingForServerToRegister") !=
+                    std::string::npos;
             if (session_error.empty()) {
                 fail("Timed out waiting for a session");
                 return;
             }
             log("session attempt " + std::to_string(attempt + 1) +
                 " failed: " + session_error);
-            if (!agent_error || attempt == attempts - 1) {
+            if (!waking || attempt == attempts - 1) {
                 fail("Session failed: " + session_error);
                 return;
             }
-            // AgentCommandError on home: console still waking -> retry.
+            // Console still waking (agent boot / WNS registration) -> retry.
         }
     } catch (const std::exception& error) {
         fail(error.what());
