@@ -30,7 +30,15 @@ jobs:
             git -C deps/src/libpeer/third_party/mbedtls apply "$PWD/deps/patches/mbedtls-switch.patch"
             git -C deps/src/libpeer/third_party/usrsctp apply "$PWD/deps/patches/usrsctp-switch.patch"
             mkdir -p /work && ln -s "$PWD/deps" /work/deps
-            bash deps/build-switch.sh --inside
+            # The script's smoke test links the deps alone, but peer_log /
+            # ifaddrs / mbedtls_hardware_poll live app-side (switch_compat.c),
+            # so it cannot pass here; verify the artifacts instead. The final
+            # .nro link below is the real test.
+            bash deps/build-switch.sh --inside || true
+            for lib in libpeer.a libsrtp2.a libusrsctp.a libmbedtls.a \
+                       libmbedcrypto.a libmbedx509.a; do
+              test -f "deps/switch/lib/$lib" || { echo "missing $lib"; exit 1; }
+            done
           fi
 
       - name: Build green-nx.nro
