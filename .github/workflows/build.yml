@@ -17,8 +17,21 @@ jobs:
           path: deps/switch
           key: deps-${{ hashFiles('deps/build-switch.sh', 'deps/patches/**') }}
 
+      # build-switch.sh's host half wraps the build in `docker run`, but this
+      # job already runs inside the devkitpro image, so replicate the host
+      # steps (clone + patch) and invoke the container half (--inside), which
+      # expects the deps tree mounted at /work/deps.
       - name: Build WebRTC deps (libpeer, libsrtp, usrsctp)
-        run: test -f deps/switch/lib/libpeer.a || bash deps/build-switch.sh
+        run: |
+          if [ ! -f deps/switch/lib/libpeer.a ]; then
+            git clone --recursive --depth 1 --shallow-submodules \
+              https://github.com/sepfy/libpeer deps/src/libpeer
+            git -C deps/src/libpeer apply "$PWD/deps/patches/libpeer-switch.patch"
+            git -C deps/src/libpeer/third_party/mbedtls apply "$PWD/deps/patches/mbedtls-switch.patch"
+            git -C deps/src/libpeer/third_party/usrsctp apply "$PWD/deps/patches/usrsctp-switch.patch"
+            mkdir -p /work && ln -s "$PWD/deps" /work/deps
+            bash deps/build-switch.sh --inside
+          fi
 
       - name: Build green-nx.nro
         run: make -j"$(nproc)"
