@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <memory>
@@ -141,13 +142,14 @@ struct SwitchRumble {
 #endif
 
 struct Settings {
-    int quality = 2;    // 0=720p, 1=1080p, 2=1080p HQ
+    int quality = 1;    // 0=720p, 1=1080p, 2=1080p low-latency
     int mapping = 0;    // 0=positional, 1=match labels
     int vibration = 2;  // rumble intensity: 0=Off, 1=Low, 2=Medium, 3=High
     int region = 0;     // region-bypass IP: 0=Off, else index into kRegion*
     int language = 0;   // index into kLanguage* (0 = English US)
     int source = 0;     // 0=ask every time, 1=xCloud, 2=your Xbox
     float volume = 3.0f;  // output gain for streamed audio (0.5-4.0); tune in settings.json
+    int debug_hud = 1;  // 0=off, 1=on: on-screen debug overlay while streaming
 };
 
 constexpr int kLanguageCount = 14;
@@ -156,8 +158,60 @@ constexpr int kVibrationLevels = 4;
 Settings load_settings();
 void save_settings(const Settings& settings);
 
+// Short synthesized "tick" for menu navigation. Played through SDL's audren
+// backend, which is independent of the stream's audout output, so the two never
+// conflict. Amplitude follows the user's "volume" setting.
+class UiSound {
+public:
+    bool init() {
+        SDL_AudioSpec want{}, have{};
+        want.freq = 48000;
+        want.format = AUDIO_S16SYS;
+        want.channels = 2;
+        want.samples = 512;
+        dev_ = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+        if (!dev_) return false;
+        const int n = 48000 * 16 / 1000;  // ~16 ms
+        click_.resize(static_cast<size_t>(n) * 2);
+        for (int i = 0; i < n; ++i) {
+            float t = static_cast<float>(i) / 48000.0f;
+            float s = std::sin(2.0f * 3.14159265f * 1600.0f * t) *
+                      std::exp(-t * 140.0f) * 0.09f;  // quiet base level
+            auto v = static_cast<int16_t>(s * 32767.0f);
+            click_[i * 2] = v;
+            click_[i * 2 + 1] = v;
+        }
+        SDL_PauseAudioDevice(dev_, 0);
+        return true;
+    }
+    void play(float volume) {
+        if (!dev_ || click_.empty()) return;
+        std::vector<int16_t> buf(click_.size());
+        for (size_t i = 0; i < click_.size(); ++i) {
+            int v = static_cast<int>(click_[i] * volume);
+            buf[i] = v > 32767 ? 32767 : (v < -32768 ? -32768
+                                                     : static_cast<int16_t>(v));
+        }
+        SDL_ClearQueuedAudio(dev_);  // don't pile up on rapid navigation
+        SDL_QueueAudio(dev_, buf.data(),
+                       static_cast<Uint32>(buf.size() * sizeof(int16_t)));
+    }
+
+private:
+    SDL_AudioDeviceID dev_ = 0;
+    std::vector<int16_t> click_;
+};
+
+// A tappable footer hint chip: its screen rect and the button key it maps to.
+struct HintHit {
+    SDL_Rect rect;
+    std::string key;
+};
+
 struct App {
     gfx::Gfx gfx;
+    UiSound ui_sound;
+    std::vector<HintHit> hint_hits;  // footer chips recorded for touch taps
     std::unique_ptr<Covers> covers;
     std::unique_ptr<XboxAuth> auth;
 
@@ -215,7 +269,7 @@ Settings load_settings() {
     if (!in) return settings;
     json data = json::parse(in, nullptr, false);
     if (data.is_discarded()) return settings;
-    settings.quality = std::clamp(data.value("quality", 2), 0, 2);
+    settings.quality = std::clamp(data.value("quality", 1), 0, 2);
     settings.mapping = std::clamp(data.value("mapping", 0), 0, 1);
     // "vibration" was an on/off bool before intensity levels existed; migrate.
     if (data.contains("vibration") && data["vibration"].is_boolean())
@@ -228,6 +282,7 @@ Settings load_settings() {
         std::clamp(data.value("language", 0), 0, kLanguageCount - 1);
     settings.source = std::clamp(data.value("source", 0), 0, 2);
     settings.volume = std::clamp(data.value("volume", 3.0f), 0.5f, 4.0f);
+    settings.debug_hud = std::clamp(data.value("debug_hud", 1), 0, 1);
     return settings;
 }
 
@@ -239,7 +294,8 @@ void save_settings(const Settings& settings) {
                 {"region", settings.region},
                 {"language", settings.language},
                 {"source", settings.source},
-                {"volume", settings.volume}}.dump(2);
+                {"volume", settings.volume},
+                {"debug_hud", settings.debug_hud}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -580,11 +636,13 @@ void draw_hints(App& app, const std::vector<Hint>& hints,
         app.gfx.fill({0, kFooterY, gfx::kWidth, kFooterH}, gfx::kBar);
         app.gfx.fill({0, kFooterY, gfx::kWidth, 2}, gfx::kChip);
     }
+    app.hint_hits.clear();
     int x = gfx::kWidth - kMargin;
     for (auto it = hints.rbegin(); it != hints.rend(); ++it) {
         int lw = app.gfx.text_width(it->label, gfx::FontSize::Small);
         int cw = chip_width(app, it->key);
         x -= cw + 12 + lw;
+        app.hint_hits.push_back({{x, kFooterY, cw + 12 + lw, kFooterH}, it->key});
         int cy = kFooterY + (kFooterH - 40) / 2;
         draw_chip(app, it->key, x, cy, it->primary);
         app.gfx.text(it->label, x + cw + 12, cy + 4, gfx::FontSize::Small,
@@ -775,7 +833,7 @@ constexpr int kRowsVisible = 2;
 const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
                                     "Consoles"};
 
-const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
+const char* kQualityLabels[3] = {"720p", "1080p", "1080p low-latency"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 
@@ -795,9 +853,14 @@ std::string console_label(const App& app) {
 void launch_stream(App& app, bool home) {
     app.launching_home = home && !app.consoles.empty();
 #ifdef GNX_NATIVE_STREAM
-    QualityTier tier = static_cast<QualityTier>(app.settings.quality);
+    // 720p / 1080p / "1080p low-latency": the last two both stream 1080p; the
+    // low-latency variant just flips the present pacing (no separate tier).
+    QualityTier tier = app.settings.quality == 0 ? QualityTier::P720
+                                                 : QualityTier::P1080;
     const char* locale = kLanguageCodes[app.settings.language];
     app.engine->set_audio_gain(app.settings.volume);
+    app.engine->set_low_latency(app.settings.quality == 2);
+    app.engine->set_debug_hud(app.settings.debug_hud != 0);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1176,14 +1239,22 @@ void draw_settings(App& app) {
         {"Vibration", kVibrationLabels[app.settings.vibration]},
         {"Region bypass", kRegionLabels[app.settings.region]},
         {"Game language", kLanguageLabels[app.settings.language]},
+        {"Volume",
+         std::to_string(static_cast<int>(app.settings.volume * 100 + 0.5f)) + "%"},
     };
     if (!app.consoles.empty())
         rows.push_back({"Preferred source",
                         app.settings.source == 2   ? console_label(app)
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
+    rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
+    // Compress the row pitch when there are many rows so the last one always
+    // stays above the note box (~y=820) instead of sliding under it. Caps at the
+    // original 108 so a short list looks unchanged.
+    int pitch = std::min(108, (800 - 170) /
+                                  std::max(1, static_cast<int>(rows.size())));
     for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
-        SDL_Rect row = {120, 170 + i * 108, gfx::kWidth - 240, 96};
+        SDL_Rect row = {120, 170 + i * pitch, gfx::kWidth - 240, pitch - 12};
         bool focused = i == app.settings_cursor;
         // Row-focus variant (card 1g): wide elements don't scale — surface
         // lift + 10px side bar + 4px border + one glow frame instead.
@@ -1215,33 +1286,37 @@ void draw_settings(App& app) {
     // Contextual note: a fixed structured box (fill kBar + frame + accent
     // side bar), swapping content with the focused row. The bar turns kWarn
     // while Region bypass is active.
+    // "Preferred source" only exists when a console is linked; "Debug HUD" is
+    // always the last row -- so their indices shift by one. Compute them.
+    int src_row = app.consoles.empty() ? -1 : 6;
+    int hud_row = app.consoles.empty() ? 6 : 7;
     const char* line1;
     const char* line2;
-    switch (app.settings_cursor) {
-        case 5:
-            line1 = "Where Play launches games: xCloud (cloud servers) or";
-            line2 = "remote play from your own console over your network.";
-            break;
-        case 1:
-            line1 = "Positional keeps the Switch layout under your thumbs;";
-            line2 = "match labels follows the printed A/B/X/Y letters.";
-            break;
-        case 2:
-            line1 = "Rumble intensity for the game's vibration effects.";
-            line2 = "High still leaves headroom to avoid the HD-rumble hum.";
-            break;
-        case 3:
-            line1 = "Region bypass spoofs your location to Xbox to reach";
-            line2 = "xCloud from an unsupported country. Use at your own risk.";
-            break;
-        case 4:
-            line1 = "Sets the streamed console's language for games without";
-            line2 = "an in-game language menu. Takes effect on next launch.";
-            break;
-        default:
-            line1 = "Higher quality needs a stronger connection — 5 GHz";
-            line2 = "Wi-Fi or docked LAN is recommended for high bitrate.";
-            break;
+    int c = app.settings_cursor;
+    if (c == 1) {
+        line1 = "Positional keeps the Switch layout under your thumbs;";
+        line2 = "match labels follows the printed A/B/X/Y letters.";
+    } else if (c == 2) {
+        line1 = "Rumble intensity for the game's vibration effects.";
+        line2 = "High still leaves headroom to avoid the HD-rumble hum.";
+    } else if (c == 3) {
+        line1 = "Region bypass spoofs your location to Xbox to reach";
+        line2 = "xCloud from an unsupported country. Use at your own risk.";
+    } else if (c == 4) {
+        line1 = "Sets the streamed console's language for games without";
+        line2 = "an in-game language menu. Takes effect on next launch.";
+    } else if (c == 5) {
+        line1 = "Output volume for streamed audio — raise it if the stream";
+        line2 = "sounds quiet even with the console at full volume.";
+    } else if (c == src_row) {
+        line1 = "Where Play launches games: xCloud (cloud servers) or";
+        line2 = "remote play from your own console over your network.";
+    } else if (c == hud_row) {
+        line1 = "On-screen overlay with live stream stats while you play.";
+        line2 = "A debug tool — turn it off for a clean picture.";
+    } else {
+        line1 = "720p or 1080p. \"1080p low-latency\" shows frames the";
+        line2 = "instant they decode: less lag, a touch less smooth.";
     }
     SDL_Rect note = {120, 820, gfx::kWidth - 240, 120};
     app.gfx.fill(note, gfx::kBar);
@@ -1333,6 +1408,73 @@ void apply_rumble(App& app) {
 // Shared error card (cards 1i/1j): top 8px error band + a boxed card with
 // an "!" glyph header, message body, and optional context/log lines.
 // Returns the y where extra content (suggestion box) may continue.
+// Turn a raw engine/HTTP error into a short, actionable line. Unmatched errors
+// fall through unchanged; the full text is always in stream-log.txt.
+std::string friendly_error(const std::string& raw) {
+    std::string s = lowercase(raw);
+    auto has = [&](const char* n) { return s.find(n) != std::string::npos; };
+    if (has("resolve host") || has("couldn't resolve") || has("could not resolve"))
+        return "Couldn't reach Microsoft sign-in (DNS). Check your connection; "
+               "on a shared PC or phone hotspot, set a manual DNS such as "
+               "1.1.1.1 on the console.";
+    if (has("timed out") || has("timeout"))
+        return "The connection timed out. Check your network and try again.";
+    if (has("connection refused") || has("connect to host") ||
+        has("couldn't connect") || has("could not connect"))
+        return "Couldn't connect to the server. Check your internet and retry.";
+    if (has("agentcommanderror"))
+        return "Your console didn't accept the session. Make sure it's on (or "
+               "in Instant-on) and try again.";
+    if (has("401") || has("403") || has("unauthorized") || has("token"))
+        return "Sign-in expired or was rejected. Try signing in again.";
+    return raw;
+}
+
+// Word-wrap `text` to lines no wider than max_width at `size`, drawing them from
+// (x, y) downward; caps at max_lines and ellipsizes the overflow. Returns the y
+// just past the last line. Fixes long errors spilling outside their card.
+int draw_text_wrapped(App& app, const std::string& text, int x, int y,
+                      gfx::FontSize size, gfx::Color color, int max_width,
+                      int line_h, int max_lines) {
+    auto width = [&](const std::string& s) { return app.gfx.text_width(s, size); };
+    std::vector<std::string> words;
+    for (size_t i = 0; i < text.size();) {
+        while (i < text.size() && text[i] == ' ') ++i;
+        size_t start = i;
+        while (i < text.size() && text[i] != ' ') ++i;
+        if (i > start) words.push_back(text.substr(start, i - start));
+    }
+    std::string line;
+    int lines = 0;
+    for (size_t w = 0; w < words.size(); ++w) {
+        std::string cand = line.empty() ? words[w] : line + " " + words[w];
+        if (width(cand) <= max_width) {
+            line = cand;
+            continue;
+        }
+        if (line.empty()) {  // a single word wider than the box: hard-truncate
+            line = words[w];
+            while (line.size() > 1 && width(line) > max_width) line.pop_back();
+            continue;
+        }
+        if (lines >= max_lines - 1) {  // no more room: ellipsize and stop
+            while (!line.empty() && width(line + "...") > max_width) line.pop_back();
+            app.gfx.text(line + "...", x, y, size, color);
+            return y + line_h;
+        }
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+        ++lines;
+        line = words[w];
+        while (line.size() > 1 && width(line) > max_width) line.pop_back();
+    }
+    if (!line.empty()) {
+        app.gfx.text(line, x, y, size, color);
+        y += line_h;
+    }
+    return y;
+}
+
 int draw_error_card(App& app, const SDL_Rect& card, const char* title,
                     const std::string& message, const std::string& context,
                     bool show_log_path) {
@@ -1350,14 +1492,9 @@ int draw_error_card(App& app, const SDL_Rect& card, const char* title,
     app.gfx.fill({card.x, card.y + 128, card.w, 2}, gfx::kChip);
 
     int y = card.y + 164;
-    app.gfx.text(message.substr(0, 60), card.x + 48, y, gfx::FontSize::Body,
-                 gfx::kText);
-    if (message.size() > 60) {
-        y += 52;
-        app.gfx.text(message.substr(60, 60), card.x + 48, y,
-                     gfx::FontSize::Body, gfx::kText);
-    }
-    y += 60;
+    y = draw_text_wrapped(app, friendly_error(message), card.x + 48, y,
+                          gfx::FontSize::Body, gfx::kText, card.w - 96, 46, 4);
+    y += 12;
     if (!context.empty()) {
         app.gfx.text(context, card.x + 48, y, gfx::FontSize::Note,
                      gfx::kTextDim);
@@ -1534,13 +1671,40 @@ struct Input {
     bool plus = false, minus = false, zl = false, zr = false;
     bool l = false, r = false;
     bool quit = false;
+    bool touch = false;            // a finger tapped this frame
+    int touch_x = 0, touch_y = 0;  // tap position in 1920x1080 design space
+    int swipe_rows = 0;            // vertical swipe -> grid rows to scroll
 };
 
 Input poll_input(SDL_Joystick* joystick) {
     Input input;
+    static float s_touch_down_x = 0, s_touch_down_y = 0;
+    static bool s_touching = false;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         if (event.type == SDL_QUIT) input.quit = true;
+        if (event.type == SDL_FINGERDOWN) {  // remember where the touch began
+            s_touch_down_x = event.tfinger.x;
+            s_touch_down_y = event.tfinger.y;
+            s_touching = true;
+        }
+        if (event.type == SDL_FINGERUP && s_touching) {
+            s_touching = false;
+            int dx = static_cast<int>((event.tfinger.x - s_touch_down_x) *
+                                      gfx::kWidth);
+            int dy = static_cast<int>((event.tfinger.y - s_touch_down_y) *
+                                      gfx::kHeight);
+            int adx = dx < 0 ? -dx : dx;
+            int ady = dy < 0 ? -dy : dy;
+            if (ady > 120 && ady > adx) {  // vertical swipe -> scroll the grid
+                input.swipe_rows = -dy / (kCardH + kGapY);
+                if (input.swipe_rows == 0) input.swipe_rows = dy < 0 ? 1 : -1;
+            } else {  // a tap
+                input.touch = true;
+                input.touch_x = static_cast<int>(event.tfinger.x * gfx::kWidth);
+                input.touch_y = static_cast<int>(event.tfinger.y * gfx::kHeight);
+            }
+        }
         if (event.type == SDL_JOYBUTTONDOWN) {
             switch (event.jbutton.button) {
                 case kBtnA: input.a = true; break;
@@ -1623,6 +1787,7 @@ int main(int argc, char** argv) {
 
     App app;
     if (!app.gfx.init()) return 1;
+    app.ui_sound.init();  // menu navigation ticks (best-effort; ignored on fail)
     SDL_Joystick* joystick = SDL_JoystickOpen(0);
     app.covers = std::make_unique<Covers>(app.gfx, data_path("covers"));
     app.auth = std::make_unique<XboxAuth>(data_path("tokens.json"));
@@ -1653,6 +1818,35 @@ int main(int argc, char** argv) {
     while (running) {
         Input input = poll_input(joystick);
         if (input.quit) break;
+
+        // Snapshot navigation state; a menu tick plays below if it moved this
+        // frame (grid cursor, tab, console cursor, settings row or volume).
+        int nav_cursor = app.cursor, nav_console = app.console_cursor,
+            nav_settings = app.settings_cursor;
+        LibraryTab nav_tab = app.tab;
+        float nav_volume = app.settings.volume;
+
+        // A tap on the footer hint bar acts as that button press.
+        if (input.touch) {
+            for (const HintHit& h : app.hint_hits) {
+                if (input.touch_x >= h.rect.x &&
+                    input.touch_x <= h.rect.x + h.rect.w &&
+                    input.touch_y >= h.rect.y &&
+                    input.touch_y <= h.rect.y + h.rect.h) {
+                    const std::string& k = h.key;
+                    if (k == "A") input.a = true;
+                    else if (k == "B") input.b = true;
+                    else if (k == "X") input.x = true;
+                    else if (k == "Y") input.y = true;
+                    else if (k == "L") input.l = true;
+                    else if (k == "R") input.r = true;
+                    else if (k == "ZL") input.zl = true;
+                    else if (k == "ZR") input.zr = true;
+                    input.touch = false;  // consumed by the hint bar
+                    break;
+                }
+            }
+        }
 
         switch (app.scene) {
             case Scene::Splash:
@@ -1717,6 +1911,57 @@ int main(int argc, char** argv) {
                 int tabs = app.consoles.empty() ? 3 : kTabCount;
                 bool console_tab = app.tab == LibraryTab::Consoles;
 
+                // Touch: tap a tab to switch, or a card to select + open it,
+                // reusing the A path (input.a) below. Design-space coords.
+                if (input.touch) {
+                    if (input.touch_y >= 116 && input.touch_y <= 190) {
+                        int tx = kGridX + chip_width(app, "L") + 44;
+                        for (int t = 0; t < tabs; ++t) {
+                            int w = app.gfx.text_width(kTabNames[t],
+                                                       gfx::FontSize::Body);
+                            if (input.touch_x >= tx - 16 &&
+                                input.touch_x <= tx + w + 16) {
+                                app.tab = static_cast<LibraryTab>(t);
+                                app.cursor = 0;
+                                apply_filter(app);
+                                break;
+                            }
+                            tx += w + 44;
+                        }
+                    } else if (console_tab) {
+                        int cx = input.touch_x - kGridX;
+                        int cy = input.touch_y - 300;
+                        if (cx >= 0 && cy >= 0 && cy < 380) {
+                            int i = cx / (560 + 56);
+                            if (i < static_cast<int>(app.consoles.size()) &&
+                                i < 3 && cx - i * (560 + 56) < 560) {
+                                app.console_cursor = i;
+                                input.a = true;
+                            }
+                        }
+                    } else {
+                        int gx = input.touch_x - kGridX;
+                        int gy = input.touch_y - kGridY;
+                        if (gx >= 0 && gy >= 0) {
+                            int col = gx / (kCardW + kGapX);
+                            int row = gy / (kCardH + kGapY);
+                            if (col < kColumns &&
+                                gx - col * (kCardW + kGapX) < kCardW &&
+                                gy - row * (kCardH + kGapY) < kCardH) {
+                                int first_row = std::max(
+                                    0, app.cursor / kColumns - (kRowsVisible - 1));
+                                int index = (first_row + row) * kColumns + col;
+                                if (index >= 0 &&
+                                    index <
+                                        static_cast<int>(app.visible.size())) {
+                                    app.cursor = index;
+                                    input.a = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (input.l || input.r) {  // switch tab
                     int t = (static_cast<int>(app.tab) + (input.r ? 1 : -1) +
                              tabs) % tabs;
@@ -1752,6 +1997,11 @@ int main(int argc, char** argv) {
                     if (step != 0 && !app.visible.empty()) {
                         app.cursor = std::clamp(
                             app.cursor + step, 0,
+                            static_cast<int>(app.visible.size()) - 1);
+                    }
+                    if (input.swipe_rows != 0 && !app.visible.empty()) {
+                        app.cursor = std::clamp(
+                            app.cursor + input.swipe_rows * kColumns, 0,
                             static_cast<int>(app.visible.size()) - 1);
                     }
                     if (input.x && !app.visible.empty()) {  // toggle favorite
@@ -1852,7 +2102,7 @@ int main(int argc, char** argv) {
             }
 
             case Scene::Settings: {
-                int last_row = app.consoles.empty() ? 4 : 5;
+                int last_row = app.consoles.empty() ? 6 : 7;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -1879,9 +2129,21 @@ int main(int argc, char** argv) {
                         app.settings.language =
                             (app.settings.language + direction + kLanguageCount) %
                             kLanguageCount;
-                    else
-                        app.settings.source =
-                            (app.settings.source + direction + 3) % 3;
+                    else if (app.settings_cursor == 5)
+                        app.settings.volume = std::clamp(
+                            app.settings.volume + direction * 0.5f, 0.5f, 4.0f);
+                    else {
+                        // Rows 6+ : optional "Preferred source", then "Debug HUD"
+                        // (always last). Their indices depend on the console list.
+                        int src_row = app.consoles.empty() ? -1 : 6;
+                        int hud_row = app.consoles.empty() ? 6 : 7;
+                        if (app.settings_cursor == src_row)
+                            app.settings.source =
+                                (app.settings.source + direction + 3) % 3;
+                        else if (app.settings_cursor == hud_row)
+                            app.settings.debug_hud =
+                                app.settings.debug_hud ? 0 : 1;
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) app.scene = app.settings_return;
@@ -1988,6 +2250,12 @@ int main(int argc, char** argv) {
             continue;      // deko3d owns the frame; no SDL pass this iteration
         }
 #endif
+
+        if (app.cursor != nav_cursor || app.tab != nav_tab ||
+            app.console_cursor != nav_console ||
+            app.settings_cursor != nav_settings ||
+            app.settings.volume != nav_volume)
+            app.ui_sound.play(app.settings.volume);
 
         app.covers->pump();
         app.gfx.begin_frame();

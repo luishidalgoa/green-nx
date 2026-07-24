@@ -1,0 +1,62 @@
+# Fork-only CI: builds the .nro inside the devkitpro image so changes can be
+# verified without a local toolchain. Not intended for upstream PRs.
+name: build
+
+on: [push, workflow_dispatch]
+
+jobs:
+  nro:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache WebRTC deps
+        uses: actions/cache@v4
+        with:
+          path: deps/switch
+          key: deps-${{ hashFiles('deps/build-switch.sh', 'deps/patches/**') }}
+
+      # build-switch.sh's host half wraps the build in `docker run`, but this
+      # job already runs inside the devkitpro image, so replicate the host
+      # steps (clone + patch) and invoke the container half (--inside), which
+      # expects the deps tree mounted at /work/deps.
+      - name: Build WebRTC deps (libpeer, libsrtp, usrsctp)
+        run: |
+          if [ ! -f deps/switch/lib/libpeer.a ]; then
+            git clone --recursive --depth 1 --shallow-submodules \
+              https://github.com/sepfy/libpeer deps/src/libpeer
+            git -C deps/src/libpeer apply "$PWD/deps/patches/libpeer-switch.patch"
+            git -C deps/src/libpeer/third_party/mbedtls apply "$PWD/deps/patches/mbedtls-switch.patch"
+            git -C deps/src/libpeer/third_party/usrsctp apply "$PWD/deps/patches/usrsctp-switch.patch"
+            mkdir -p /work && ln -s "$PWD/deps" /work/deps
+            # The script's smoke test links the deps alone, but peer_log /
+            # ifaddrs / mbedtls_hardware_poll live app-side (switch_compat.c),
+            # so it cannot pass here; verify the artifacts instead. The final
+            # .nro link below is the real test.
+            bash deps/build-switch.sh --inside || true
+            for lib in libpeer.a libsrtp2.a libusrsctp.a libmbedtls.a \
+                       libmbedcrypto.a libmbedx509.a; do
+              test -f "deps/switch/lib/$lib" || { echo "missing $lib"; exit 1; }
+            done
+          fi
+
+      - name: Build green-nx.nro
+        # Version source of truth is the Makefile's APP_VERSION. Tag builds
+        # (refs/tags/vX.Y.Z) ship it clean; branch/dev builds append the short
+        # commit SHA so each is distinguishable on-console.
+        # NOTE: the step shell is POSIX sh, so no bash ${VAR:0:7} substring --
+        # printf %.7s is POSIX-portable.
+        run: |
+          VER=$(sed -n 's/^APP_VERSION[[:space:]]*:=[[:space:]]*//p' Makefile | head -1)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            make -j"$(nproc)" APP_VERSION="$VER"
+          else
+            SHA=$(printf %.7s "$GITHUB_SHA")
+            make -j"$(nproc)" APP_VERSION="$VER-$SHA"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: green-nx.nro
+          path: green-nx.nro

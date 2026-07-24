@@ -12,7 +12,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := green-nx
 APP_AUTHOR  := rmrf404
-APP_VERSION := 1.0.14
+APP_VERSION := 1.2.0
 APP_ICON    := icon.jpg
 
 TARGET   := green-nx
@@ -84,7 +84,8 @@ export NROFLAGS += --icon=$(CURDIR)/$(APP_ICON) --nacp=$(CURDIR)/$(TARGET).nacp
 # deko3d shaders: compiled from GLSL to .dksh with uam and shipped in romfs.
 UAM        := $(DEVKITPRO)/tools/bin/uam
 SHADER_OUT := $(CURDIR)/romfs/shaders/video_vsh.dksh \
-              $(CURDIR)/romfs/shaders/video_fsh.dksh
+              $(CURDIR)/romfs/shaders/video_fsh.dksh \
+              $(CURDIR)/romfs/shaders/hud_fsh.dksh
 
 .PHONY: all clean shaders
 

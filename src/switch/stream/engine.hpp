@@ -57,6 +57,14 @@ public:
     // from the "volume" setting before each stream start; 1.0 = unchanged.
     void set_audio_gain(float gain) { audio_gain_ = gain; }
 
+    // Present a freshly decoded frame ASAP (rate-limited to the panel) instead
+    // of on the steady clock -- lower latency, slightly less smooth. Set before
+    // start(); default false.
+    void set_low_latency(bool enabled) { low_latency_ = enabled; }
+
+    // Draw the on-screen debug HUD overlay while streaming. Set before start().
+    void set_debug_hud(bool enabled) { debug_hud_ = enabled; }
+
     EngineState state() const { return state_; }
     std::string status() const;
     std::string error() const;
@@ -154,6 +162,7 @@ private:
     std::condition_variable video_cv_;  // wakes decode_loop when an AU arrives
     std::deque<std::vector<uint8_t>> video_queue_;
     std::atomic<bool> got_frame_{false};
+    std::atomic<uint64_t> video_bytes_{0};  // RTP video bytes rx (HUD bitrate)
 
     // Decoded-frame handoff (Switch): decode_thread_ decodes into shared_frame_;
     // the render thread (pump_video) takes its own ref into present_frame_ so it
@@ -177,6 +186,10 @@ private:
     Uint64 stream_epoch_ = 0;
     // Render-thread software vsync pacer for the deko3d present (see pump_video).
     double next_present_ms_ = 0;
+    double last_present_ms_ = 0;            // low-latency mode: last present time
+    bool low_latency_ = false;              // present-on-decode vs steady clock
+    bool debug_hud_ = true;                 // draw the debug HUD overlay
+    std::atomic<bool> frame_ready_{false};  // decode thread -> render: new frame
     std::atomic<Uint64> last_keyframe_req_{0};
     std::atomic<uint32_t> pli_sent_{0};  // RTCP PLI keyframe requests
 
