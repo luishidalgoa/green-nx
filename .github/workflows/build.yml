@@ -42,14 +42,19 @@ jobs:
           fi
 
       - name: Build green-nx.nro
-        # Stamp dev builds with the short commit SHA so each one is
-        # distinguishable on-console instead of every build reading the same
-        # fixed version. Overrides the Makefile's APP_VERSION := ... default.
+        # Version source of truth is the Makefile's APP_VERSION. Tag builds
+        # (refs/tags/vX.Y.Z) ship it clean; branch/dev builds append the short
+        # commit SHA so each is distinguishable on-console.
         # NOTE: the step shell is POSIX sh, so no bash ${VAR:0:7} substring --
         # printf %.7s is POSIX-portable.
         run: |
-          SHA=$(printf %.7s "$GITHUB_SHA")
-          make -j"$(nproc)" APP_VERSION="1.2.0-$SHA"
+          VER=$(sed -n 's/^APP_VERSION[[:space:]]*:=[[:space:]]*//p' Makefile | head -1)
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            make -j"$(nproc)" APP_VERSION="$VER"
+          else
+            SHA=$(printf %.7s "$GITHUB_SHA")
+            make -j"$(nproc)" APP_VERSION="$VER-$SHA"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
