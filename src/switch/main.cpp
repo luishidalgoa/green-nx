@@ -386,6 +386,10 @@ struct App {
     std::vector<HomeConsole> consoles;  // linked Xboxes; empty = hide feature
     bool launching_home = false;        // what the current stream targets
     int console_cursor = 0;             // selected console (list + launches)
+    std::atomic<int> power_state{0};    // 0 idle, 1 sending, 2 sent, 3 failed
+    std::string power_msg;              // shown under the console cards
+    Uint32 power_msg_until = 0;         // keep the outcome up for a few seconds
+    bool power_arm = false;             // turning a console off asks twice
     int pick_cursor = 0;                // SourcePicker: 0 xCloud, 1 your Xbox
     Uint32 pick_a_since = 0;            // SourcePicker: A held since (hold=default)
     bool pick_pending = false;          // SourcePicker: A press awaiting release
@@ -1034,6 +1038,33 @@ const HomeConsole& selected_console(const App& app) {
         app.console_cursor, 0, static_cast<int>(app.consoles.size()) - 1)];
 }
 
+// Turn the selected console on or off through Xbox's remote-management
+// service, on the worker thread -- it is a couple of HTTPS round trips and the
+// library screen keeps drawing meanwhile.
+void start_power_command(App& app, bool turn_on) {
+    if (app.power_state == 1 || app.consoles.empty()) return;
+    join_worker(app);
+    const HomeConsole& console = selected_console(app);
+    std::string id = console.server_id;
+    std::string name = console.name.empty() ? "Your Xbox" : console.name;
+    app.power_state = 1;
+    app.power_msg = (turn_on ? "Waking " : "Turning off ") + name + "...";
+    app.worker = std::thread([&app, id, name, turn_on] {
+        try {
+            XblCredentials xbl = app.auth->fetch_xbl_credentials();
+            Http http;
+            send_console_power(http, xbl, id, turn_on);
+            app.power_msg =
+                name + (turn_on ? " is waking up" : " is turning off");
+            app.power_state = 2;
+        } catch (const std::exception& error) {
+            app.power_msg = std::string("Power command failed: ") +
+                            error.what();
+            app.power_state = 3;
+        }
+    });
+}
+
 std::string console_label(const App& app) {
     if (app.consoles.empty()) return "Your Xbox";
     const HomeConsole& console = selected_console(app);
@@ -1213,7 +1244,23 @@ void draw_library(App& app) {
                          app.gfx.text_width(info, gfx::FontSize::Small),
                      138, gfx::FontSize::Small, gfx::kFaint);
         draw_console_cards();
+        // Power feedback: the in-flight/last message, or the disarm prompt
+        // while a turn-off is waiting for its second press.
+        std::string note;
+        gfx::Color note_color = gfx::kTextDim;
+        if (app.power_arm) {
+            note = "Press X again to turn this console off";
+            note_color = gfx::kWarn;
+        } else if (app.power_state == 1 ||
+                   SDL_GetTicks() < app.power_msg_until) {
+            note = app.power_msg;
+        }
+        if (!note.empty())
+            app.gfx.text(note, kGridX, 712, gfx::FontSize::Note, note_color);
+        bool console_on = !app.consoles.empty() &&
+                          selected_console(app).power_state == "On";
         draw_hints(app, {{"A", "Connect", true},
+                         {"X", console_on ? "Turn off" : "Wake"},
                          {"L R", "Tabs"},
                          {"ZR", "Refresh"},
                          {"ZL", "Settings"},
@@ -2229,6 +2276,15 @@ int main(int argc, char** argv) {
                 int tabs = app.consoles.empty() ? 3 : kTabCount;
                 bool console_tab = app.tab == LibraryTab::Consoles;
 
+                // A finished power command: reap the thread and leave the
+                // outcome on screen briefly.
+                if (app.power_state == 2 || app.power_state == 3) {
+                    join_worker(app);
+                    app.power_state = 0;
+                    app.power_msg_until = SDL_GetTicks() + 5000;
+                }
+                if (!console_tab) app.power_arm = false;
+
                 // Touch: tap a tab to switch, or a card to select + open it,
                 // reusing the A path (input.a) below. Design-space coords.
                 if (input.touch) {
@@ -2297,6 +2353,22 @@ int main(int argc, char** argv) {
                     if (input.right)
                         app.console_cursor =
                             std::min(last, app.console_cursor + 1);
+                    // Moving off the card (or leaving the tab) disarms, so a
+                    // stray second X can never turn a console off.
+                    if (input.left || input.right) app.power_arm = false;
+                    // X powers the console: waking is harmless and goes
+                    // straight through, turning off takes a second press.
+                    if (input.x && last >= 0 && app.power_state != 1) {
+                        if (selected_console(app).power_state != "On") {
+                            app.power_arm = false;
+                            start_power_command(app, true);
+                        } else if (!app.power_arm) {
+                            app.power_arm = true;
+                        } else {
+                            app.power_arm = false;
+                            start_power_command(app, false);
+                        }
+                    }
                     if (input.a && last >= 0) {
                         const HomeConsole& console = selected_console(app);
                         app.launch_game = Game{};
