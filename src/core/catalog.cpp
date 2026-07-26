@@ -1,6 +1,9 @@
 #include "catalog.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <random>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -51,6 +54,54 @@ std::vector<HomeConsole> fetch_home_consoles(
         if (!console.server_id.empty()) consoles.push_back(std::move(console));
     }
     return consoles;
+}
+
+namespace {
+
+// The command service wants a fresh session id per request. Any v4-shaped uuid
+// does; it is only used to correlate the call.
+std::string make_session_id() {
+    static std::mt19937_64 rng(
+        static_cast<uint64_t>(std::chrono::system_clock::now()
+                                  .time_since_epoch()
+                                  .count()));
+    auto hex = [](uint64_t value, int digits) {
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%0*llx", digits,
+                      static_cast<unsigned long long>(value));
+        return std::string(buf);
+    };
+    uint64_t a = rng(), b = rng();
+    return hex(a >> 32, 8) + "-" + hex((a >> 16) & 0xFFFF, 4) + "-4" +
+           hex(a & 0xFFF, 3) + "-" + hex(0x8 | ((b >> 60) & 0x3), 1) +
+           hex((b >> 48) & 0xFFF, 3) + "-" + hex(b & 0xFFFFFFFFFFFF, 12);
+}
+
+}  // namespace
+
+void send_console_power(Http& http, const XblCredentials& xbl,
+                        const std::string& console_id, bool turn_on) {
+    json body = {
+        {"destination", "Xbox"},
+        {"type", "Power"},
+        {"command", turn_on ? "WakeUp" : "TurnOff"},
+        {"sessionId", make_session_id()},
+        {"sourceId", "com.microsoft.smartglass"},
+        {"parameters", json::array({json::object()})},
+        {"linkedXboxId", console_id},
+    };
+    HttpResponse response =
+        http.post("https://xccs.xboxlive.com/commands", body.dump(),
+                  {"Content-Type: application/json",
+                   "x-xbl-contract-version: 4",
+                   "skillplatform: RemoteManagement",
+                   "Authorization: XBL3.0 x=" + xbl.user_hash + ";" +
+                       xbl.token});
+    if (!response.ok())
+        throw std::runtime_error(std::string(turn_on ? "wake" : "turn off") +
+                                 " failed with HTTP " +
+                                 std::to_string(response.status) + ": " +
+                                 response.body.substr(0, 200));
 }
 
 std::vector<Game> fetch_playable_titles(Http& http,

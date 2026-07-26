@@ -40,6 +40,13 @@ struct XboxProfile {
     std::string avatar_url;
 };
 
+// XSTS credentials for the plain Xbox Live REST APIs (profile, console
+// commands), used as "Authorization: XBL3.0 x=<user_hash>;<token>".
+struct XblCredentials {
+    std::string token;
+    std::string user_hash;
+};
+
 // Microsoft device-code OAuth + Xbox Live token chain + xCloud (GSSV) login.
 // Mirrors the flow used by xbox.com/play and open clients (Greenlight, green-vita).
 class XboxAuth {
@@ -67,6 +74,10 @@ public:
     StreamingCredentials fetch_streaming_credentials();
 
     XboxProfile fetch_profile();
+
+    // Token chain for the Xbox Live REST APIs (relying party
+    // http://xboxlive.com), which the streaming ones (gssv) cannot be used for.
+    XblCredentials fetch_xbl_credentials();
 
     // Short-lived MSA token used by the session /connect handshake.
     std::string fetch_passport_token();

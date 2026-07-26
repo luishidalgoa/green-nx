@@ -240,16 +240,22 @@ std::string XboxAuth::fetch_passport_token() {
     return response.at("access_token");
 }
 
-XboxProfile XboxAuth::fetch_profile() {
+XblCredentials XboxAuth::fetch_xbl_credentials() {
     std::string access_token = refresh_user_token();
     std::string user_token = xsts_user_authenticate(access_token);
     auto [xbl_token, uhs] = xsts_authorize(user_token, "http://xboxlive.com");
+    return {xbl_token, uhs};
+}
+
+XboxProfile XboxAuth::fetch_profile() {
+    XblCredentials xbl = fetch_xbl_credentials();
 
     json response = expect_ok(
         http_.get("https://profile.xboxlive.com/users/me/profile/settings"
                   "?settings=GameDisplayPicRaw,Gamertag,Gamerscore",
                   {"x-xbl-contract-version: 3",
-                   "Authorization: XBL3.0 x=" + uhs + ";" + xbl_token}),
+                   "Authorization: XBL3.0 x=" + xbl.user_hash + ";" +
+                       xbl.token}),
         "profile");
 
     XboxProfile profile;
