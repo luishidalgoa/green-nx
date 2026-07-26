@@ -79,6 +79,33 @@ std::vector<std::string> local_candidates_from_sdp(const std::string& sdp) {
     return out;
 }
 
+// Address field of "candidate:<foundation> <comp> <proto> <prio> <addr> <port>".
+std::string candidate_address(const std::string& candidate) {
+    std::istringstream fields(candidate);
+    std::vector<std::string> parts;
+    std::string token;
+    while (fields >> token) parts.push_back(token);
+    return parts.size() >= 5 ? parts[4] : std::string();
+}
+
+bool is_private_ipv4(const std::string& address) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(address.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4)
+        return false;
+    return a == 10 || a == 127 || (a == 172 && b >= 16 && b <= 31) ||
+           (a == 192 && b == 168) || (a == 169 && b == 254);
+}
+
+// Same /24 -- enough to tell "this LAN address is on my network" from "this LAN
+// address belongs to a network I am not on".
+bool same_subnet(const std::string& left, const std::string& right) {
+    size_t left_cut = left.rfind('.');
+    size_t right_cut = right.rfind('.');
+    if (left_cut == std::string::npos || right_cut == std::string::npos)
+        return false;
+    return left.compare(0, left_cut, right, 0, right_cut) == 0;
+}
+
 std::string ufrag_from_sdp(const std::string& sdp) {
     size_t at = sdp.find("a=ice-ufrag:");
     if (at == std::string::npos) return "";
@@ -902,6 +929,34 @@ bool Engine::run_peer(GssvSession& session) {
         return true;
     }
 
+    // Try the candidates most likely to work from where we actually are first.
+    // libpeer checks pairs one at a time on a budget of a few seconds each, so
+    // within the negotiation timeout only the first few are ever reached. The
+    // console lists its LAN address first: exactly right at home, and dead
+    // weight from any other network, where it burns the budget before the
+    // routable candidates get a turn. Keep private addresses that are on our
+    // own subnet up front (the home case, which keeps connecting instantly) and
+    // push the rest behind the routable ones.
+    {
+        std::string our_lan;
+        for (const std::string& candidate : local_candidates_from_sdp(munged)) {
+            std::string address = candidate_address(candidate);
+            if (is_private_ipv4(address)) {
+                our_lan = address;
+                break;
+            }
+        }
+        std::stable_partition(
+            remote.begin(), remote.end(),
+            [&our_lan](const std::string& candidate) {
+                std::string address = candidate_address(candidate);
+                if (!is_private_ipv4(address)) return true;  // routable
+                return !our_lan.empty() && same_subnet(address, our_lan);
+            });
+        if (!remote.empty())
+            log("checking " + candidate_address(remote.front()) + " first");
+    }
+
     {
         std::lock_guard<std::mutex> lock(peer_mutex_);
         for (const std::string& candidate : remote)
@@ -1047,8 +1102,10 @@ bool Engine::run_peer(GssvSession& session) {
             log("ICE connected but DTLS/SCTP never completed -- dead media path");
             return false;
         }
+        // Away from home the working pair is rarely the first one tried, and
+        // each pair costs libpeer a few seconds -- 45 s covered very few.
         if (state_ == EngineState::Negotiating &&
-            SDL_GetTicks64() - negotiation_started > 45000) {
+            SDL_GetTicks64() - negotiation_started > 75000) {
             fail("Connection timed out");
             return true;
         }

@@ -29,6 +29,17 @@ involved.
   highest quality
 - A 5 GHz Wi-Fi connection is recommended
 
+### Remote play from outside your home network
+
+Streaming your own console over the internet also needs the console reachable
+from outside: on the router it is connected to, forward **UDP 9002** (and
+**UDP 3074**) to it, or enable UPnP so it can open those itself. Give the
+console a fixed address first, so the rule cannot end up pointing at a
+different device. On the console, *Remote features* must be on and the power
+mode set to *Instant on*.
+
+Inside your own network none of this is needed.
+
 ## Install
 
 1. Copy `green-nx.nro` to `sdmc:/switch/` on your SD card.
