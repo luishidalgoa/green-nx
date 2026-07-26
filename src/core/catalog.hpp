@@ -40,4 +40,12 @@ struct HomeConsole {
 std::vector<HomeConsole> fetch_home_consoles(
     Http& http, const EndpointCredentials& home);
 
+// Turn a linked console on or off through the Xbox remote-management service
+// (the same one the Xbox app's power button uses). Waking is what a stream
+// start already does implicitly; turning off has no other route from here.
+// Needs the plain Xbox Live credentials, not the streaming ones. Throws on
+// failure.
+void send_console_power(Http& http, const XblCredentials& xbl,
+                        const std::string& console_id, bool turn_on);
+
 }  // namespace gnx
