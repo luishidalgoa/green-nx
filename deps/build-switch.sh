@@ -15,6 +15,10 @@
 set -euo pipefail
 
 LIBPEER_REPO="https://github.com/sepfy/libpeer"
+# Pinned: upstream moves under us (2026-08 master broke every hunk of
+# libpeer-switch.patch and bumped mbedtls to the 4.x layout). Raising the
+# pin means rebasing the patches and re-testing a real stream on hardware.
+LIBPEER_REF="9319aa434cb9e893faed0293ba9d2a21eca59c8b"
 DOCKER_IMAGE="devkitpro/devkita64"
 
 # ---------------------------------------------------------------------------
@@ -126,10 +130,14 @@ LIBPEER_DIR="$DEPS_DIR/src/libpeer"
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 1; }
 command -v git >/dev/null || { echo "git is required" >&2; exit 1; }
 
-# 1) Clone (shallow, with submodules) if missing.
+# 1) Clone the pinned commit (shallow, with submodules) if missing.
 if [[ ! -e "$LIBPEER_DIR/.git" ]]; then
   mkdir -p "$DEPS_DIR/src"
-  git clone --recursive --depth 1 --shallow-submodules "$LIBPEER_REPO" "$LIBPEER_DIR"
+  git init -q "$LIBPEER_DIR"
+  git -C "$LIBPEER_DIR" remote add origin "$LIBPEER_REPO"
+  git -C "$LIBPEER_DIR" fetch --depth 1 origin "$LIBPEER_REF"
+  git -C "$LIBPEER_DIR" checkout -q FETCH_HEAD
+  git -C "$LIBPEER_DIR" submodule update --init --recursive --depth 1
 fi
 
 # 2) Apply patches (idempotent: skipped when already applied).
