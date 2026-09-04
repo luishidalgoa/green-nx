@@ -31,6 +31,7 @@
 #include "covers.hpp"
 #include "gfx.hpp"
 #include "names.hpp"
+#include "qr.hpp"
 
 #ifdef GNX_NATIVE_STREAM
 #include "stream/engine.hpp"
@@ -1083,7 +1084,15 @@ void draw_signin(App& app) {
     int lw = spaced_code_width(app, left);
     int rw = spaced_code_width(app, right);
     int inner = lw + (right.empty() ? 0 : 48 + 24 + 48 + rw);
-    SDL_Rect box = {(gfx::kWidth - (inner + 160)) / 2, 480, inner + 160, 190};
+    // The code box and a QR of the same URL with the code already in it, as
+    // one centred row: the phone camera is the fast path, typing the code the
+    // fallback for anyone without one.
+    constexpr int kQrSide = 288;
+    constexpr int kQrGap = 64;
+    const bool with_qr = !app.device_code.verification_uri_complete.empty();
+    int box_w = inner + 160;
+    int row_w = box_w + (with_qr ? kQrGap + kQrSide : 0);
+    SDL_Rect box = {(gfx::kWidth - row_w) / 2, 480, box_w, 190};
     app.gfx.fill(box, gfx::kSurface);
     app.gfx.frame(box, gfx::kAccent, 4);
     int cx = box.x + 80;
@@ -1093,8 +1102,18 @@ void draw_signin(App& app) {
         draw_spaced_code(app, right, cx + 48 + 24 + 48, box.y + 34);
     }
 
-    app.gfx.spinner(gfx::kWidth / 2 - 140, 736, SDL_GetTicks());
-    app.gfx.text("Waiting for you to sign in…", gfx::kWidth / 2 - 90, 728,
+    if (with_qr) {
+        SDL_Rect qr = {box.x + box.w + kQrGap, box.y + (box.h - kQrSide) / 2,
+                       kQrSide, kQrSide};
+        draw_qr(app.gfx, app.device_code.verification_uri_complete, qr);
+        app.gfx.text_centered("Or scan this with your phone",
+                              qr.x + kQrSide / 2, qr.y + kQrSide + 14,
+                              gfx::FontSize::Small, gfx::kTextDim);
+    }
+
+    // Below the QR caption, not beside it: at 1080p the two would touch.
+    app.gfx.spinner(gfx::kWidth / 2 - 140, 798, SDL_GetTicks());
+    app.gfx.text("Waiting for you to sign in…", gfx::kWidth / 2 - 90, 790,
                  gfx::FontSize::Small, gfx::kTextDim);
     draw_hints(app, {{"ZL", "Settings · region bypass"}, {"B", "Exit"}});
 }

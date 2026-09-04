@@ -17,7 +17,7 @@ APP_ICON    := icon.jpg
 
 TARGET   := green-nx
 BUILD    := build-switch
-SOURCES  := src/core src/switch
+SOURCES  := src/core src/switch vendor
 INCLUDES := src vendor deps/shim/include
 ROMFS    := romfs
 
