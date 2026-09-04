@@ -81,6 +81,16 @@ HttpResponse Http::request(const char* method, const std::string& url,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    // The console's ssl service is initialised with three sessions for the
+    // whole process (switch-curl calls sslInitialize(0x3)) and every TLS
+    // connection takes one. libcurl otherwise keeps up to five alive per
+    // handle -- one per host it has visited -- so walking from
+    // login.microsoftonline.com through the two xboxlive auth hosts to the
+    // streaming endpoints runs the console out of sessions, and the next
+    // request fails with "SSL connect error" after the TCP connect
+    // succeeded. Keep at most one, and hand it back when the transfer ends.
+    curl_easy_setopt(curl, CURLOPT_MAXCONNECTS, 1L);
+    curl_easy_setopt(curl, CURLOPT_FORBID_REUSE, 1L);
     if (!g_ca_bundle.empty())
         curl_easy_setopt(curl, CURLOPT_CAINFO, g_ca_bundle.c_str());
     if (abort_flag_) {
