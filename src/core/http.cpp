@@ -73,6 +73,15 @@ HttpResponse Http::request(const char* method, const std::string& url,
     CURL* curl = static_cast<CURL*>(curl_);
     curl_easy_reset(curl);
 
+    // curl_easy_strerror() only names the error class: every CA-bundle
+    // failure reads as "Problem with the SSL CA cert (path? access rights?)"
+    // whether the file could not be read, the console refused to import it,
+    // or it did not parse. The backend's own reason goes to
+    // CURLOPT_ERRORBUFFER, and it is the difference between a bug report
+    // that can be acted on and one that cannot.
+    char error_buf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buf);
+
     HttpResponse response;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method);
@@ -131,9 +140,17 @@ HttpResponse Http::request(const char* method, const std::string& url,
             curl_easy_getinfo(curl, CURLINFO_PRIMARY_IP, &peer_ip);
             if (peer_ip && *peer_ip) peer = std::string(" via ") + peer_ip;
         }
+        std::string detail;
+        if (error_buf[0]) detail = std::string(" [") + error_buf + "]";
+        long os_errno = 0;
+        curl_off_t downloaded = 0;
+        curl_easy_getinfo(curl, CURLINFO_OS_ERRNO, &os_errno);
+        curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &downloaded);
+        detail += " <errno=" + std::to_string(os_errno) + " got=" +
+                  std::to_string(static_cast<long long>(downloaded)) + "B>";
         throw std::runtime_error(std::string("HTTP request failed: ") +
-                                 curl_easy_strerror(code) + " (" + url + peer +
-                                 ")");
+                                 curl_easy_strerror(code) + detail + " (" +
+                                 url + peer + ")");
     }
 
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);

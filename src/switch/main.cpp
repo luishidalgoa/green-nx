@@ -2205,6 +2205,20 @@ void draw_stream(App& app, SDL_Joystick* joystick) {
 }
 #endif
 
+// The error card wraps to four lines, and a TLS failure with its backend
+// detail overruns that -- the part that gets cut is exactly the part worth
+// reading. Keep the full text on the SD card as well.
+void log_fatal(const std::string& message) {
+#ifdef __SWITCH__
+    if (FILE* f = std::fopen("sdmc:/switch/green-nx/error-log.txt", "a")) {
+        std::fprintf(f, "%s\n", message.c_str());
+        std::fclose(f);
+    }
+#else
+    (void)message;
+#endif
+}
+
 void draw_fatal(App& app) {
     SDL_Rect card = {410, 180, 1100,
                      app.fatal.find("streaming login") != std::string::npos
@@ -2600,6 +2614,7 @@ int main(int argc, char** argv) {
                 } else if (app.signin_state == 3) {
                     join_worker(app);
                     app.fatal = app.signin_error;
+                    log_fatal(app.fatal);
                     app.scene = Scene::Fatal;
                 }
                 break;
@@ -2620,6 +2635,7 @@ int main(int argc, char** argv) {
                 } else if (app.load_state == 2) {
                     join_worker(app);
                     app.fatal = app.load_error;
+                    log_fatal(app.fatal);
                     app.scene = Scene::Fatal;
                 }
                 break;
