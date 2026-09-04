@@ -10,6 +10,9 @@ namespace gnx {
 struct DeviceCode {
     std::string user_code;
     std::string verification_uri;
+    // verification_uri with the code already in it, for the sign-in QR: a
+    // phone that scans it lands on the code screen with nothing to type.
+    std::string verification_uri_complete;
     std::string message;
     std::string device_code;
     int interval_secs = 5;

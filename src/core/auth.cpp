@@ -83,6 +83,18 @@ DeviceCode XboxAuth::request_device_code() {
     code.user_code = response.at("user_code");
     code.device_code = response.at("device_code");
     code.verification_uri = response.at("verification_uri");
+    // Entra returns verification_uri_complete only for tenants that opt in;
+    // the consumers endpoint does not, so build it the documented way. The
+    // separator the UI adds to the code is not part of it.
+    code.verification_uri_complete =
+        response.value("verification_uri_complete", "");
+    if (code.verification_uri_complete.empty()) {
+        std::string bare;
+        for (char c : code.user_code)
+            if (c != '-' && c != ' ') bare += c;
+        code.verification_uri_complete =
+            code.verification_uri + "?otc=" + Http::urlencode(bare);
+    }
     code.message = response.value("message", "");
     code.interval_secs = response.value("interval", 5);
     code.expires_in_secs = response.value("expires_in", 900);
