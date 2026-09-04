@@ -2451,7 +2451,14 @@ int main(int argc, char** argv) {
         }
     }
     plInitialize(PlServiceType_User);
-    if (R_SUCCEEDED(romfsInit())) Http::set_ca_bundle("romfs:/cacert.pem");
+    // No CA bundle: the console's ssl service accepts at most 71 imported
+    // ServerPki per context (libnx sslContextImportServerPki), and libcurl
+    // imports one per certificate on every connection it opens. Mozilla's
+    // 119-root bundle blows the limit on the first HTTPS call -- sign-in --
+    // and any smaller bundle only postpones the failure to whichever request
+    // happens to cross 71. The firmware's own root store validates every
+    // endpoint this app talks to, so let it do the job.
+    romfsInit();  // shaders
 #endif
     mkdir(kDataDir, 0755);
 
