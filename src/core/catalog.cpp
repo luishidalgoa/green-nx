@@ -184,10 +184,21 @@ void fetch_names(Http& http, const std::vector<Game*>& games,
     // the Details template runs to ~53 KB per product, so 20 already means a
     // ~1 MB response to hold in memory on the console.
     constexpr size_t kBatch = 20;
+    // displaycatalog echoes ProductId upper-cased whatever case the bigId was
+    // sent in, while a handful of xCloud titles carry a lower-case productId
+    // (HALO5 -> brrc2bp0g9p0, TELLMEWHY -> 9nbl0xkvcn5l). Keying this map on
+    // the id as it arrived means the reply for those never matches and their
+    // metadata is dropped after being fetched -- the game then shows its
+    // titleId and no box art. Fold the case on both sides.
+    auto fold = [](std::string id) {
+        for (char& c : id)
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return id;
+    };
     std::unordered_map<std::string, Game*> by_product;
     for (Game* game : games)
         if (!game->product_id.empty() && game->name.empty())
-            by_product[game->product_id] = game;
+            by_product[fold(game->product_id)] = game;
 
     std::vector<std::string> ids;
     ids.reserve(by_product.size());
@@ -211,7 +222,7 @@ void fetch_names(Http& http, const std::vector<Game*>& games,
 
         for (const json& product : parsed.value("Products", json::array())) {
             std::string product_id = product.value("ProductId", "");
-            auto found = by_product.find(product_id);
+            auto found = by_product.find(fold(product_id));
             if (found == by_product.end()) continue;
 
             const json localized =
