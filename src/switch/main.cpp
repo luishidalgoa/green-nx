@@ -292,6 +292,7 @@ struct Settings {
     int debug_hud = 0;  // 0=off, 1=on: on-screen debug overlay while streaming
     int deadzone = 0;   // stick deadzone: index into kDeadzoneLabels/Values
     int nexus = 0;      // Xbox guide button combo: index into kNexusLabels
+    int sort = 0;       // library grid order: 0=A to Z, 1=newest release first
 };
 
 constexpr int kLanguageCount = 30;
@@ -439,6 +440,7 @@ Settings load_settings() {
     settings.deadzone =
         std::clamp(data.value("deadzone", 0), 0, kDeadzoneLevels - 1);
     settings.nexus = std::clamp(data.value("nexus", 0), 0, kNexusModes - 1);
+    settings.sort = std::clamp(data.value("sort", 0), 0, 1);
     return settings;
 }
 
@@ -455,7 +457,8 @@ void save_settings(const Settings& settings) {
                 {"sharpness", settings.sharpness},
                 {"debug_hud", settings.debug_hud},
                 {"deadzone", settings.deadzone},
-                {"nexus", settings.nexus}}.dump(2);
+                {"nexus", settings.nexus},
+                {"sort", settings.sort}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -505,7 +508,7 @@ void apply_region(const Settings& settings) {
 // flags, v3 predates the ad-supported offering: all force a refresh. The
 // cache is the whole catalog (~2400 entries, ~300 KB), which is what search
 // needs to answer "is this game on xCloud?" without going back to the network.
-constexpr int kGamesCacheVersion = 4;
+constexpr int kGamesCacheVersion = 5;  // v5 adds releaseDate for the sort
 
 void save_games_cache(const std::vector<Game>& games) {
     json list = json::array();
@@ -520,7 +523,8 @@ void save_games_cache(const std::vector<Game>& games) {
                         {"ads", game.ad_supported},
                         {"adsGranted", game.ad_granted},
                         {"adsPlayable", game.ad_playable},
-                        {"maxSession", game.max_session_secs}});
+                        {"maxSession", game.max_session_secs},
+                        {"releaseDate", game.release_date}});
     std::ofstream out(user_path("games.json"), std::ios::trunc);
     out << json{{"version", kGamesCacheVersion}, {"games", list}}.dump();
 }
@@ -539,6 +543,7 @@ std::vector<Game> load_games_cache() {
         game.product_id = entry.value("productId", "");
         game.name = entry.value("name", "");
         game.box_art_url = entry.value("boxArt", "");
+        game.release_date = entry.value("releaseDate", "");
         game.owned = entry.value("owned", false);
         game.subscription = entry.value("sub", false);
         game.in_subscription = entry.value("mySub", false);
@@ -858,6 +863,26 @@ void apply_filter(App& app) {
             if (matches(game)) app.visible.push_back(i);
         }
     }
+    // Newest release first, by the Store release date. Titles with no date sink
+    // to the end and the rest stay A to Z. History keeps the order it was
+    // played in, so it is left alone.
+    if (app.settings.sort == 1 && app.tab != LibraryTab::History) {
+        auto alpha = [&app](int i) -> const std::string& {
+            const Game& game = app.games[i];
+            return game.name.empty() ? game.title_id : game.name;
+        };
+        std::stable_sort(app.visible.begin(), app.visible.end(),
+                         [&app, &alpha](int a, int b) {
+                             const std::string& date_a =
+                                 app.games[a].release_date;
+                             const std::string& date_b =
+                                 app.games[b].release_date;
+                             if (date_a.empty() != date_b.empty())
+                                 return date_b.empty();
+                             if (date_a != date_b) return date_a > date_b;
+                             return alpha(a) < alpha(b);
+                         });
+    }
     app.cursor = std::min(app.cursor,
                           std::max(0, static_cast<int>(app.visible.size()) - 1));
     app.playable_visible = 0;
@@ -1133,6 +1158,7 @@ const char* kTabNames[kTabCount] = {"All games", "Favorites", "History",
                                     "Consoles"};
 
 const char* kQualityLabels[3] = {"720p", "1080p", "1080p high bitrate"};
+const char* kSortLabels[2] = {"A to Z", "Newest release"};
 const char* kMappingLabels[2] = {"Positional (Switch A = Xbox B)",
                                  "Match labels (Switch A = Xbox A)"};
 const char* kSharpnessLabels[4] = {"Off", "Low", "Medium", "High"};
@@ -1704,6 +1730,7 @@ void draw_settings(App& app) {
                         : app.settings.source == 1 ? "xCloud"
                                                    : "Ask every time"});
     rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
+    rows.push_back({"Library order", kSortLabels[app.settings.sort]});
     int accounts_row = static_cast<int>(rows.size());
     rows.push_back({"Accounts",
                     std::to_string(g_accounts.size()) +
@@ -1783,6 +1810,9 @@ void draw_settings(App& app) {
         line1 = "Share the console: each account keeps its own sign-in,";
         line2 = "library and favorites. Press A to switch or add one.";
     } else if (app.settings_cursor == accounts_row - 1) {
+        line1 = "Newest release sorts the grid by each game's Store release";
+        line2 = "date. That is not when it joined Game Pass.";
+    } else if (app.settings_cursor == accounts_row - 2) {
         line1 = "On-screen overlay with live stream stats (resolution, FPS,";
         line2 = "bitrate, loss). Toggle in-game by holding ZL + ZR + −.";
     } else switch (app.settings_cursor) {
@@ -2829,10 +2859,12 @@ int main(int argc, char** argv) {
             case Scene::Settings: {
                 // Row order: quality, mapping, vibration, region, language,
                 // volume, pacing, sharpness, deadzone, Xbox button, [source
-                // when a console is linked], Debug HUD, accounts, sign out.
+                // when a console is linked], Debug HUD, library order,
+                // accounts, sign out.
                 int hud_row = app.consoles.empty() ? 10 : 11;
-                int accounts_row = hud_row + 1;
-                int signout_row = hud_row + 2;
+                int sort_row = hud_row + 1;
+                int accounts_row = hud_row + 2;
+                int signout_row = hud_row + 3;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -2918,6 +2950,10 @@ int main(int argc, char** argv) {
                             (app.settings.source + direction + 3) % 3;
                     else if (app.settings_cursor == hud_row)
                         app.settings.debug_hud = app.settings.debug_hud ? 0 : 1;
+                    else if (app.settings_cursor == sort_row) {
+                        app.settings.sort = (app.settings.sort + direction + 2) % 2;
+                        apply_filter(app);  // re-order the grid right away
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) {
