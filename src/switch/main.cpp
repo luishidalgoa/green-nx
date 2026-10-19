@@ -294,6 +294,7 @@ struct Settings {
     int nexus = 0;      // Xbox guide button combo: index into kNexusLabels
     int sort = 0;       // library grid order: 0=A to Z, 1=newest release first
     int quick_launch = 0;  // library A: 0=open details, 1=play now (B: details)
+    std::string server_region;  // cloud region label (#62); empty = Automatic
 };
 
 constexpr int kLanguageCount = 30;
@@ -396,6 +397,8 @@ struct App {
     int detail_index = -1;   // games[] index shown in Scene::Detail
     int detail_cursor = 0;   // 0 = Play, 1 = favorite, 2 = Play on... (if any)
     std::vector<HomeConsole> consoles;  // linked Xboxes; empty = hide feature
+    // Cloud regions the login offered, for the "Server region" setting (#62).
+    std::vector<ServerRegion> cloud_regions;
     bool launching_home = false;        // what the current stream targets
     int console_cursor = 0;             // selected console (list + launches)
     int pick_cursor = 0;                // SourcePicker: 0 xCloud, 1 your Xbox
@@ -443,6 +446,7 @@ Settings load_settings() {
     settings.nexus = std::clamp(data.value("nexus", 0), 0, kNexusModes - 1);
     settings.sort = std::clamp(data.value("sort", 0), 0, 1);
     settings.quick_launch = std::clamp(data.value("quick_launch", 0), 0, 1);
+    settings.server_region = data.value("server_region", std::string());
     return settings;
 }
 
@@ -461,7 +465,8 @@ void save_settings(const Settings& settings) {
                 {"deadzone", settings.deadzone},
                 {"nexus", settings.nexus},
                 {"sort", settings.sort},
-                {"quick_launch", settings.quick_launch}}.dump(2);
+                {"quick_launch", settings.quick_launch},
+                {"server_region", settings.server_region}}.dump(2);
 }
 
 // Streamed console's system language (BCP-47). Games without an in-game
@@ -666,6 +671,34 @@ void start_signin(App& app) {
     });
 }
 
+// The cloud regions the login offered, cached like the consoles so Settings
+// can list them without a login (#62). Only what the menu needs is kept.
+void save_regions_cache(const std::vector<ServerRegion>& regions) {
+    json list = json::array();
+    for (const ServerRegion& region : regions)
+        list.push_back({{"name", region.name},
+                        {"host", region.host},
+                        {"default", region.is_default}});
+    std::ofstream out(user_path("regions.json"), std::ios::trunc);
+    out << json{{"regions", list}}.dump();
+}
+
+std::vector<ServerRegion> load_regions_cache() {
+    std::vector<ServerRegion> regions;
+    std::ifstream in(user_path("regions.json"));
+    if (!in) return regions;
+    json data = json::parse(in, nullptr, false);
+    if (data.is_discarded() || !data.is_object()) return regions;
+    for (const json& entry : data.value("regions", json::array())) {
+        ServerRegion region;
+        region.name = entry.value("name", "");
+        region.host = entry.value("host", "");
+        region.is_default = entry.value("default", false);
+        if (!region.host.empty()) regions.push_back(std::move(region));
+    }
+    return regions;
+}
+
 void start_library_load(App& app, bool force_refresh) {
     app.load_state = 0;
     app.status = "Connecting to Xbox...";
@@ -678,6 +711,7 @@ void start_library_load(App& app, bool force_refresh) {
                 if (!cached.empty()) {
                     app.games = std::move(cached);
                     app.consoles = load_consoles_cache();
+                    app.cloud_regions = load_regions_cache();
                     app.load_state = 1;
                     return;
                 }
@@ -686,6 +720,12 @@ void start_library_load(App& app, bool force_refresh) {
             StreamingCredentials credentials =
                 app.auth->fetch_streaming_credentials();
             app.status = "Loading your library...";
+            // Regions for the Settings row. A login that offers none keeps the
+            // last list instead of erasing it.
+            if (!credentials.cloud.regions.empty()) {
+                app.cloud_regions = credentials.cloud.regions;
+                save_regions_cache(app.cloud_regions);
+            }
             Http http;
             // Linked consoles for xHome remote play. Non-fatal: no consoles
             // (or an error here) just leaves the source picker hidden. The
@@ -1203,6 +1243,7 @@ void launch_stream(App& app, bool home) {
                                                : stream::VideoPacing::Steady);
     app.engine->set_sharpness(app.settings.sharpness);
     app.engine->set_debug_hud(app.settings.debug_hud != 0);
+    app.engine->set_server_region(app.settings.server_region);
     if (app.launching_home)
         app.engine->start_home(selected_console(app).server_id, tier, locale);
     else
@@ -1784,6 +1825,9 @@ void draw_settings(App& app) {
     rows.push_back({"Debug HUD", app.settings.debug_hud ? "On" : "Off"});
     rows.push_back({"Library order", kSortLabels[app.settings.sort]});
     rows.push_back({"Library A button", kQuickLaunchLabels[app.settings.quick_launch]});
+    rows.push_back({"Server region", app.settings.server_region.empty()
+                                         ? std::string("Automatic")
+                                         : app.settings.server_region});
     int accounts_row = static_cast<int>(rows.size());
     rows.push_back({"Accounts",
                     std::to_string(g_accounts.size()) +
@@ -1863,12 +1907,15 @@ void draw_settings(App& app) {
         line1 = "Share the console: each account keeps its own sign-in,";
         line2 = "library and favorites. Press A to switch or add one.";
     } else if (app.settings_cursor == accounts_row - 1) {
+        line1 = "Where cloud sessions start. Automatic uses the region xCloud";
+        line2 = "marks as default; pick another to try a closer server.";
+    } else if (app.settings_cursor == accounts_row - 2) {
         line1 = "Play now starts the focused game with A; B opens its details.";
         line2 = "Open details keeps A for the details screen, as before.";
-    } else if (app.settings_cursor == accounts_row - 2) {
+    } else if (app.settings_cursor == accounts_row - 3) {
         line1 = "Newest release sorts the grid by each game's Store release";
         line2 = "date. That is not when it joined Game Pass.";
-    } else if (app.settings_cursor == accounts_row - 3) {
+    } else if (app.settings_cursor == accounts_row - 4) {
         line1 = "On-screen overlay with live stream stats (resolution, FPS,";
         line2 = "bitrate, loss). Toggle in-game by holding ZL + ZR + −.";
     } else switch (app.settings_cursor) {
@@ -2919,12 +2966,13 @@ int main(int argc, char** argv) {
                 // Row order: quality, mapping, vibration, region, language,
                 // volume, pacing, sharpness, deadzone, Xbox button, [source
                 // when a console is linked], Debug HUD, library order,
-                // library A button, accounts, sign out.
+                // library A button, server region, accounts, sign out.
                 int hud_row = app.consoles.empty() ? 10 : 11;
                 int sort_row = hud_row + 1;
                 int quick_row = hud_row + 2;
-                int accounts_row = hud_row + 3;
-                int signout_row = hud_row + 4;
+                int region_row = hud_row + 3;
+                int accounts_row = hud_row + 4;
+                int signout_row = hud_row + 5;
                 if (input.up)
                     app.settings_cursor = std::max(0, app.settings_cursor - 1);
                 if (input.down)
@@ -3016,6 +3064,19 @@ int main(int argc, char** argv) {
                     } else if (app.settings_cursor == quick_row)
                         app.settings.quick_launch =
                             (app.settings.quick_launch + direction + 2) % 2;
+                    else if (app.settings_cursor == region_row &&
+                             !app.cloud_regions.empty()) {
+                        // Automatic first, then each region the login offered.
+                        std::vector<std::string> labels = {""};
+                        for (const ServerRegion& region : app.cloud_regions)
+                            labels.push_back(region.label());
+                        const int count = static_cast<int>(labels.size());
+                        int at = 0;
+                        for (int i = 0; i < count; ++i)
+                            if (labels[i] == app.settings.server_region) at = i;
+                        app.settings.server_region =
+                            labels[(at + direction + count) % count];
+                    }
                     save_settings(app.settings);
                 }
                 if (input.b || input.zl) {
