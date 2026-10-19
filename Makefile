@@ -11,8 +11,8 @@ endif
 include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := green-nx
-APP_AUTHOR  := rmrf404
-APP_VERSION := 1.0.31pre1
+APP_AUTHOR  := luishidalgoa
+APP_VERSION := 1.4.0
 APP_ICON    := icon.jpg
 
 TARGET   := green-nx
