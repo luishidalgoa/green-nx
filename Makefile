@@ -12,7 +12,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 APP_TITLE   := green-nx
 APP_AUTHOR  := luishidalgoa
-APP_VERSION := 1.4.0
+APP_VERSION := 1.4.2-diag1
 APP_ICON    := icon.jpg
 
 TARGET   := green-nx

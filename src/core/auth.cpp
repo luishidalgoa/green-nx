@@ -263,7 +263,11 @@ StreamingCredentials XboxAuth::fetch_streaming_credentials() {
         // streamed without the cloud offering. Only when neither is left is
         // there nothing to show, and then the cloud reason is the one to name.
         credentials.cloud_error = error.what();
-        if (credentials.home.host.empty()) throw;
+        // Name both refusals when neither login worked: the fatal screen and
+        // error-log then show why remote play failed too, not only the cloud.
+        if (credentials.home.host.empty())
+            throw std::runtime_error(credentials.cloud_error +
+                                     " | xhome: " + credentials.home_error);
     }
     try {
         credentials.cloud_f2p = streaming_login(gssv_token, "xgpuwebf2p");
